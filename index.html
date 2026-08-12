@@ -34,8 +34,20 @@ const THEMES = [
   {name:"Fucsia",main:"#f43f5e",dark:"#be123c"},{name:"Índigo",main:"#6366f1",dark:"#4338ca"},
 ];
 const BLOCK_COLORS = ["#f59e0b","#6366f1","#8b5cf6"];
-function getTodayKey(){return new Date().toISOString().slice(0,10);}
-function getWeekKey(){const d=new Date(),day=d.getDay()||7,mon=new Date(d);mon.setDate(d.getDate()-day+1);return mon.toISOString().slice(0,10);}
+
+// --- FIX zona horaria: usar SIEMPRE fecha local, nunca UTC ---
+function fmtKey(d){
+  const y=d.getFullYear();
+  const m=String(d.getMonth()+1).padStart(2,"0");
+  const day=String(d.getDate()).padStart(2,"0");
+  return y+"-"+m+"-"+day;
+}
+function parseKey(key){
+  const [y,m,d]=key.split("-").map(Number);
+  return new Date(y,m-1,d);
+}
+function getTodayKey(){return fmtKey(new Date());}
+function getWeekKey(){const d=new Date(),day=d.getDay()||7,mon=new Date(d);mon.setDate(d.getDate()-day+1);return fmtKey(mon);}
 
 function NutriBar({val,max,color,label,unit="g"}){
   const pct=Math.min(100,Math.round((val/max)*100));
@@ -78,7 +90,16 @@ function App(){
   const [textMeal,setTextMeal]=useState("");
   const [analyzingText,setAnalyzingText]=useState(false);
   const fileRef=useRef();
-  const todayKey=getTodayKey();
+
+  // --- auto-refresca la app cuando cambia el día local (para que a medianoche real se vea el nuevo día sin recargar a mano) ---
+  const [todayKey,setTodayKey]=useState(getTodayKey());
+  useEffect(function(){
+    const timer=setInterval(function(){
+      const k=getTodayKey();
+      setTodayKey(function(prev){return prev!==k?k:prev;});
+    },30000);
+    return function(){clearInterval(timer);};
+  },[]);
   const weekKey=getWeekKey();
 
   useEffect(function(){localStorage.setItem("dta_acts",JSON.stringify(activities));},[activities]);
@@ -90,9 +111,9 @@ function App(){
   const todayChecks=checks[todayKey]||{};
   const toggle=function(id){setChecks(function(prev){const day=Object.assign({},prev[todayKey]||{});day[id]=!day[id];return Object.assign({},prev,{[todayKey]:day});});};
   const dayRating=activities.length?Math.round((Object.values(todayChecks).filter(Boolean).length/activities.length)*100):0;
-  const weekDays=Array.from({length:7},function(_,i){const d=new Date(weekKey);d.setDate(d.getDate()+i);return d.toISOString().slice(0,10);});
+  const weekDays=Array.from({length:7},function(_,i){const d=parseKey(weekKey);d.setDate(d.getDate()+i);return fmtKey(d);});
   const weekCount=function(actId){return weekDays.filter(function(d){return !!(checks[d]||{})[actId];}).length;};
-  const streak=(function(){let count=0;const d=new Date();d.setDate(d.getDate()-1);while(true){const k=d.toISOString().slice(0,10);const dc=checks[k]||{};const pct=activities.length?Math.round((Object.values(dc).filter(Boolean).length/activities.length)*100):0;if(pct>=80){count++;d.setDate(d.getDate()-1);}else break;}if(dayRating>=80)count++;return count;})();
+  const streak=(function(){let count=0;const d=new Date();d.setDate(d.getDate()-1);while(true){const k=fmtKey(d);const dc=checks[k]||{};const pct=activities.length?Math.round((Object.values(dc).filter(Boolean).length/activities.length)*100):0;if(pct>=80){count++;d.setDate(d.getDate()-1);}else break;}if(dayRating>=80)count++;return count;})();
 
   const saveActivity=function(){if(!form.name.trim())return;if(editId!==null){setActivities(function(prev){return prev.map(function(a){return a.id===editId?Object.assign({},a,form):a;});});setEditId(null);}else setActivities(function(prev){return[...prev,Object.assign({id:Date.now()},form)];});setForm({name:"",block:"Mañana",freq:5});setView("day");};
   const deleteAct=function(id){setActivities(function(prev){return prev.filter(function(a){return a.id!==id;});});};
@@ -101,9 +122,11 @@ function App(){
   const totals=todayMeals.reduce(function(acc,m){return{cals:acc.cals+m.cals,protein:acc.protein+m.protein,carbs:acc.carbs+m.carbs,fat:acc.fat+m.fat};},{cals:0,protein:0,carbs:0,fat:0});
   const onFileChange=function(e){const file=e.target.files[0];if(!file)return;setPendingFile(file);setPendingPreview(URL.createObjectURL(file));e.target.value="";};
 
+  // --- FIX IA: llamar al proxy propio en Vercel, nunca directo a Anthropic desde el navegador ---
   const callAI=async function(messages){
-    const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:messages})});
+    const resp=await fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:messages})});
     const data=await resp.json();
+    if(!resp.ok||data.error){throw new Error(data.error||"Error del servidor");}
     return data.content.map(function(i){return i.text||"";}).join("").replace(/```json|```/g,"").trim();
   };
 
@@ -142,11 +165,11 @@ function App(){
   const monthYear=monthDate.toLocaleDateString("es-MX",{month:"long",year:"numeric"});
   const firstDayOfWeek=(monthDate.getDay()+6)%7;
   const daysInMonth=new Date(monthDate.getFullYear(),monthDate.getMonth()+1,0).getDate();
-  const getMonthDayKey=function(d){return new Date(monthDate.getFullYear(),monthDate.getMonth(),d).toISOString().slice(0,10);};
+  const getMonthDayKey=function(d){return fmtKey(new Date(monthDate.getFullYear(),monthDate.getMonth(),d));};
   const dayPct=function(d){const dc=checks[getMonthDayKey(d)]||{};return activities.length?Math.round((Object.values(dc).filter(Boolean).length/activities.length)*100):0;};
   const pctBgColor=function(pct){return pct===0?"#1c1c26":pct<40?"#3b1d1d":pct<70?"#3b2f0a":pct<100?"#1a3a1a":"#14532d";};
   const pctBorderColor=function(pct,isT){return isT?C:pct===100?"#22c55e":"transparent";};
-  const last7=Array.from({length:7},function(_,i){const d=new Date();d.setDate(d.getDate()-(6-i));return d.toISOString().slice(0,10);});
+  const last7=Array.from({length:7},function(_,i){const d=new Date();d.setDate(d.getDate()-(6-i));return fmtKey(d);});
 
   const safeTop = "calc(env(safe-area-inset-top, 44px) + 12px)";
 
